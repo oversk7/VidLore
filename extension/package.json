@@ -1,0 +1,5 @@
+{
+  "name": "vidlore-extension",
+  "private": true,
+  "type": "module"
+}
