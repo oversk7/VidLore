@@ -221,7 +221,19 @@
                 >{{ cardStatusLabel(item) }}</span>
                 <span class="time-tag">{{ formatTime(item.uploadTime) }}</span>
               </div>
-              <div class="action-dock">
+              <form v-if="renamingId === item.id" class="rename-form" @submit.prevent="submitRename(item)">
+                <input
+                    v-model="renameDraft"
+                    maxlength="100"
+                    placeholder="输入视频名称"
+                    aria-label="视频名称"
+                    :disabled="renameSaving"
+                    @keydown.esc.prevent="cancelRename"
+                />
+                <button type="submit" class="dock-item ai-core" :disabled="renameSaving">{{ renameSaving ? '保存中' : '保存' }}</button>
+                <button type="button" class="dock-item" :disabled="renameSaving" @click="cancelRename">取消</button>
+              </form>
+              <div v-else class="action-dock">
                 <button
                     class="dock-item ai-core"
                     :disabled="item.status !== 'COMPLETED'"
@@ -241,10 +253,18 @@
                     @click="downloadAudio(item)"
                 >下载音频</button>
                 <button
-                    class="delete-btn"
+                    class="icon-btn rename-btn"
+                    title="重命名"
+                    :aria-label="`重命名 ${displayName(item)}`"
+                    @click.stop="startRename(item)"
+                >
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"></path><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z"></path></svg>
+                </button>
+                <button
+                    class="icon-btn delete-btn"
                     :disabled="deletingId === item.id"
                     :title="deletingId === item.id ? '正在删除…' : '删除视频'"
-                    :aria-label="`删除 ${item.filename}`"
+                    :aria-label="`删除 ${displayName(item)}`"
                     @click.stop="deleteItem(item)"
                 >
                   <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14H6L5 6"></path><path d="M8 6V4h8v2"></path></svg>
@@ -574,7 +594,9 @@ const elapsedSeconds = ref(0)
 const visibleList = computed(() => {
   const query = searchQuery.value.trim().toLocaleLowerCase()
   if (!query) return list.value
-  return list.value.filter(item => item.filename?.toLocaleLowerCase().includes(query))
+  // 同时匹配原始文件名和卡片上显示的名字，用户按看到的字就能搜到
+  return list.value.filter(item => [item.filename, displayName(item)]
+    .some(name => name?.toLocaleLowerCase().includes(query)))
 })
 const isDragOver = ref(false)
 const currentUser = ref(null)
@@ -624,11 +646,68 @@ const cardStatusTitle = item => {
     ? 'AI 分析正在后台执行，完成后会提示你'
     : '文字提取正在后台执行，完成后会提示你'
 }
-// 仅用于展示：链接导入的视频文件名是 WEB_<uuid>.mp4，列表里换成可读的名字并去掉扩展名
+// 取不到标题的链接导入视频，文件名是 WEB_<uuid>.mp4，列表里显示成可读的占位名
+const isUnnamedImport = item => /^WEB_[0-9a-f-]{36}\./i.test(item.filename || '')
 const displayName = item => {
   const name = item.filename || ''
-  if (/^WEB_[0-9a-f-]{36}\./i.test(name)) return '在线导入的视频'
+  if (isUnnamedImport(item)) return '在线导入的视频'
   return name.replace(/\.[^.]+$/, '') || name
+}
+
+// --- 重命名：卡片上就地编辑，只改展示名称 ---
+const renamingId = ref(null)
+const renameDraft = ref('')
+const renameSaving = ref(false)
+
+const startRename = async item => {
+  renamingId.value = item.id
+  renameDraft.value = isUnnamedImport(item) ? '' : displayName(item)
+  await nextTick()
+  const input = document.querySelector('.rename-form input')
+  input?.focus()
+  input?.select()
+}
+
+const cancelRename = () => {
+  renamingId.value = null
+  renameDraft.value = ''
+}
+
+const submitRename = async item => {
+  const name = renameDraft.value.trim()
+  if (!name) {
+    showMsg('视频名称不能为空', true)
+    return
+  }
+  if (name === displayName(item) && !isUnnamedImport(item)) {
+    cancelRename()
+    return
+  }
+  if (DEMO_MODE) {
+    item.filename = `${name}.mp4`
+    cancelRename()
+    return
+  }
+  if (renameSaving.value) return
+  renameSaving.value = true
+  const isCurrentSession = captureAuthSession()
+  try {
+    const params = new URLSearchParams({ id: String(item.id), name })
+    const res = await apiRequest(`/media/rename?${params}`, { method: 'POST' })
+    if (!isCurrentSession()) return
+    if (!res.ok) {
+      showMsg('❌ ' + await res.text(), true)
+      return
+    }
+    const renamed = await res.json()
+    item.filename = renamed.filename
+    cancelRename()
+    showMsg('已重命名')
+  } catch {
+    if (isCurrentSession()) showMsg('❌ 重命名请求失败', true)
+  } finally {
+    if (isCurrentSession()) renameSaving.value = false
+  }
 }
 
 // 仅用于展示：后端没有生成封面，视频库直接截取原视频第 8 秒的画面；取不到时保留纯色封面
@@ -1165,7 +1244,7 @@ const deleteItem = async (item) => {
   const warning = runningTask
     ? '\n\n注意：该视频还有任务正在后台执行，删除后这次的结果会丢失。'
     : ''
-  if (!confirm(`确认要永久删除 "${item.filename}" 吗？${warning}`)) return
+  if (!confirm(`确认要永久删除 "${displayName(item)}" 吗？${warning}`)) return
   deletingId.value = item.id
   const isCurrentSession = captureAuthSession()
   try {
@@ -1175,7 +1254,7 @@ const deleteItem = async (item) => {
     if (res.ok) {
       listRequestVersion += 1
       listLoading.value = false
-      showMsg(`已删除 ${item.filename}`)
+      showMsg(`已删除 ${displayName(item)}`)
       list.value = list.value.filter(i => i.id !== item.id)
       discardMediaWorkspace(item.id)
     } else {
@@ -1336,6 +1415,8 @@ const resetSessionState = () => {
   authRequestVersion += 1
   authLoading.value = false
   deletingId.value = null
+  cancelRename()
+  renameSaving.value = false
   listLoading.value = false
   listError.value = ''
   uploadAbort.value?.abort()
@@ -1674,9 +1755,13 @@ button { font: inherit; color: inherit; }
 .dock-item.ai-core { border-color: var(--cobalt); background: var(--cobalt); color: var(--sheet); font-weight: 500; }
 .dock-item.ai-core:hover:not(:disabled) { background: var(--cobalt-deep); border-color: var(--cobalt-deep); }
 .dock-item:disabled { opacity: 0.4; cursor: not-allowed; }
-.delete-btn { display: grid; place-items: center; width: 30px; height: 30px; margin-left: auto; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--ink-faint); cursor: pointer; }
+.icon-btn { display: grid; place-items: center; width: 30px; height: 30px; flex: none; border: 0; border-radius: var(--control-radius); background: transparent; color: var(--ink-faint); cursor: pointer; }
+.rename-btn { margin-left: auto; }
+.rename-btn:hover { color: var(--cobalt); background: var(--paper); }
 .delete-btn:hover:not(:disabled) { color: var(--danger); background: var(--danger-wash); }
 .delete-btn:disabled { cursor: progress; opacity: 0.5; }
+.rename-form { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.rename-form input { flex: 1; min-width: 0; border: 1px solid var(--cobalt); border-radius: var(--control-radius); background: var(--sheet); color: var(--ink); padding: 5px 9px; font: inherit; font-size: 0.875rem; outline: none; }
 
 .library-empty { padding: 48px 20px; text-align: center; color: var(--ink-soft); border: 1.5px dashed var(--rule); border-radius: var(--surface-radius); }
 .library-empty button { margin-top: 12px; border: 0; background: transparent; color: var(--cobalt); font-weight: 500; text-decoration: underline; text-underline-offset: 3px; cursor: pointer; }

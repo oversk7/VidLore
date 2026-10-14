@@ -41,10 +41,14 @@ public class MediaIngestService {
 
         File tempFile = null;
         try {
-            tempFile = ytDlpUtils.downloadVideo(url);
+            YtDlpUtils.DownloadedVideo downloaded = ytDlpUtils.downloadVideo(url);
+            tempFile = downloaded.file();
             String md5 = mediaService.calculateMd5(tempFile);
             String fileUrl = minioUtils.uploadLocalFile(tempFile);
-            return mediaService.saveUploadedMedia("WEB_" + tempFile.getName(), fileUrl, userId, md5);
+            // 优先用站点上的视频标题命名；取不到标题时回退到 WEB_<uuid>.mp4，前端显示为“在线导入的视频”
+            String filename = mediaService.nameToFilename(downloaded.title(), ".mp4");
+            return mediaService.saveUploadedMedia(
+                    filename != null ? filename : "WEB_" + tempFile.getName(), fileUrl, userId, md5);
         } finally {
             // 这份文件只是搬运工，进了 MinIO 就别继续占着本地磁盘了。
             if (tempFile != null && tempFile.exists() && !tempFile.delete()) {

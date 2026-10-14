@@ -96,6 +96,13 @@ public class MediaController {
         return Result.ok(mediaService.readableSource(mediaFile.getFilePath()));
     }
 
+    @PostMapping("/rename")
+    public Result<MediaSummary> rename(@RequestParam Long id,
+                                       @RequestParam String name,
+                                       @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {
+        return Result.ok(MediaSummary.from(mediaService.renameOwnedMedia(id, userId, name)));
+    }
+
     @DeleteMapping("/delete")
     public Result<Void> delete(@RequestParam("id") Long id,
                                @RequestAttribute(AuthService.REQUEST_USER_ID) Long userId) {

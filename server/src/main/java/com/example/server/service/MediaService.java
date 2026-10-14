@@ -27,6 +27,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Pattern;
 
 @Service
 public class MediaService {
@@ -45,6 +46,8 @@ public class MediaService {
     private static final String MEDIA_MD5_KEY_PREFIX = "media:md5:";
     private static final Set<String> VIDEO_SUFFIXES = Set.of(
             ".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v");
+    private static final int MAX_NAME_CHARS = 100;
+    private static final Pattern UNSAFE_NAME_CHARS = Pattern.compile("[\\p{Cntrl}\\\\/:*?\"<>|]");
 
     public MediaService(MediaFileMapper mediaFileMapper,
                         StringRedisTemplate redisTemplate,
@@ -221,6 +224,39 @@ public class MediaService {
             throw new IllegalArgumentException("仅支持 MP4、MOV、MKV、AVI、WEBM 和 M4V 视频");
         }
         return normalized;
+    }
+
+    /**
+     * 把视频标题或用户输入的名称整理成文件名：去掉控制字符和路径、文件系统保留字符，
+     * 合并空白，最长 100 字，再接上扩展名。整理后为空时返回 null。
+     */
+    public String nameToFilename(String name, String suffix) {
+        if (name == null) return null;
+        String cleaned = UNSAFE_NAME_CHARS.matcher(name).replaceAll(" ").replaceAll("\\s+", " ").strip();
+        // 用户在改名框里连扩展名一起输入时，不要变成 xxx.mp4.mp4
+        if (cleaned.toLowerCase(java.util.Locale.ROOT).endsWith(suffix.toLowerCase(java.util.Locale.ROOT))) {
+            cleaned = cleaned.substring(0, cleaned.length() - suffix.length()).strip();
+        }
+        if (cleaned.codePointCount(0, cleaned.length()) > MAX_NAME_CHARS) {
+            cleaned = cleaned.substring(0, cleaned.offsetByCodePoints(0, MAX_NAME_CHARS)).strip();
+        }
+        return cleaned.isEmpty() ? null : cleaned + suffix;
+    }
+
+    /** 只改展示用的文件名；MinIO 里的对象路径是 UUID，不受影响。 */
+    public MediaFile renameOwnedMedia(Long mediaId, Long userId, String name) {
+        MediaFile mediaFile = requireOwnedMedia(mediaId, userId);
+        String filename = nameToFilename(name, fileSuffix(mediaFile.getFilename()));
+        if (filename == null) throw new IllegalArgumentException("视频名称不能为空");
+
+        MediaFile update = new MediaFile();
+        update.setId(mediaId);
+        update.setFilename(filename);
+        if (mediaFileMapper.updateById(update) == 0) throw new NoSuchElementException("文件不存在");
+        // 先改数据库，再让列表缓存失效，下次读列表会从数据库重新加载
+        invalidateUserList(userId);
+        mediaFile.setFilename(filename);
+        return mediaFile;
     }
 
     public MediaFile requireOwnedMedia(Long mediaId, Long userId) {

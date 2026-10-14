@@ -8,6 +8,7 @@ import org.springframework.stereotype.Component;
 import java.io.File;
 import java.net.InetAddress;
 import java.net.URI;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -40,10 +41,15 @@ public class YtDlpUtils {
         this.cookiesFromBrowser = cookiesFromBrowser;
     }
 
-    public File downloadVideo(String url) throws Exception {
+    /** title 是站点上的视频标题，取不到时为 null。 */
+    public record DownloadedVideo(File file, String title) {
+    }
+
+    public DownloadedVideo downloadVideo(String url) throws Exception {
         validatePublicHttpUrl(url);
         Path outputPath = Path.of(System.getProperty("java.io.tmpdir"), UUID.randomUUID() + ".mp4");
         Path logPath = Files.createTempFile("yt-dlp-", ".log");
+        Path titlePath = Files.createTempFile("yt-dlp-title-", ".txt");
         List<String> command = new ArrayList<>();
         command.add(ytDlpPath);
         command.add("--no-playlist");
@@ -78,6 +84,10 @@ public class YtDlpUtils {
             command.add(ffmpegDir);
         }
         appendCookieArgs(command);
+        // 下载完成后把视频标题单独写进一个 UTF-8 文件，不和进度日志混在一起
+        command.add("--print-to-file");
+        command.add("after_move:%(title)s");
+        command.add(titlePath.toString());
         command.add("-o");
         command.add(outputPath.toString());
         command.add(url);
@@ -97,13 +107,28 @@ public class YtDlpUtils {
                 throw new IllegalStateException("yt-dlp 下载失败: " + recentLogs(logs));
             }
             log.info("url_video_downloaded host={} bytes={}", URI.create(url).getHost(), Files.size(outputPath));
-            return outputPath.toFile();
+            return new DownloadedVideo(outputPath.toFile(), readTitle(titlePath));
         } catch (Exception e) {
             Files.deleteIfExists(outputPath);
             throw e;
         } finally {
             Files.deleteIfExists(logPath);
+            Files.deleteIfExists(titlePath);
             if (process != null && process.isAlive()) process.destroyForcibly();
+        }
+    }
+
+    /** 标题只用于展示：读不到就返回 null，由调用方回退到默认名称，不影响下载结果。 */
+    private String readTitle(Path titlePath) {
+        try {
+            return Files.readAllLines(titlePath, StandardCharsets.UTF_8).stream()
+                    .map(String::strip)
+                    .filter(line -> !line.isEmpty())
+                    .findFirst()
+                    .orElse(null);
+        } catch (Exception e) {
+            log.warn("url_video_title_read_failed", e);
+            return null;
         }
     }
 

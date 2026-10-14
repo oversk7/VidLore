@@ -76,4 +76,45 @@ class MediaServiceTest {
         assertTrue(service.listByUser(7L).isEmpty());
         verify(mapper, times(2)).selectList(any());
     }
+
+    @Test
+    void videoTitlesBecomeSafeFilenames() {
+        MediaService service = new MediaService(mock(MediaFileMapper.class), mock(StringRedisTemplate.class),
+                mock(MinioUtils.class), new ObjectMapper(), mock(AgentCheckpointService.class),
+                mock(AgentTelemetry.class), mock(QdrantVectorStore.class), mock(VideoContextService.class));
+
+        assertEquals("近年 AI 应用技术串讲 Agent Skill.mp4",
+                service.nameToFilename("  近年 AI 应用技术串讲:\nAgent/Skill  ", ".mp4"));
+        assertEquals("课程回放.mp4", service.nameToFilename("课程回放.MP4", ".mp4"));
+        assertEquals(100, service.nameToFilename("长".repeat(150), ".mp4").replace(".mp4", "").length());
+        assertNull(service.nameToFilename(" \t", ".mp4"));
+        assertNull(service.nameToFilename(null, ".mp4"));
+    }
+
+    @Test
+    void renameKeepsTheExtensionAndInvalidatesTheListCache() {
+        MediaFileMapper mapper = mock(MediaFileMapper.class);
+        StringRedisTemplate redis = mock(StringRedisTemplate.class);
+        ValueOperations<String, String> values = mock(ValueOperations.class);
+        when(redis.opsForValue()).thenReturn(values);
+        when(values.get("media:list:v3:user:7:generation")).thenReturn("before");
+        MediaService service = new MediaService(mapper, redis, mock(MinioUtils.class), new ObjectMapper(),
+                mock(AgentCheckpointService.class), mock(AgentTelemetry.class),
+                mock(QdrantVectorStore.class), mock(VideoContextService.class));
+        MediaFile media = new MediaFile();
+        media.setId(42L);
+        media.setUserId(7L);
+        media.setFilename("WEB_8908648e-1513-495a-a5e8-13f34845ae0e.mp4");
+        when(mapper.selectById(42L)).thenReturn(media);
+        when(mapper.updateById(any(MediaFile.class))).thenReturn(1);
+
+        assertEquals("AI 技术串讲.mp4", service.renameOwnedMedia(42L, 7L, "AI 技术串讲").getFilename());
+
+        verify(mapper).updateById(argThat((MediaFile update) ->
+                update.getId() == 42L && "AI 技术串讲.mp4".equals(update.getFilename())));
+        verify(redis).delete("media:list:v3:user:7:before");
+        assertThrows(IllegalArgumentException.class, () -> service.renameOwnedMedia(42L, 7L, "  "));
+        assertThrows(SecurityException.class, () -> service.renameOwnedMedia(42L, 8L, "别人的视频"));
+        verify(mapper, times(1)).updateById(any(MediaFile.class));
+    }
 }
