@@ -135,7 +135,7 @@ public class AgentLoopService {
         if (state.result() != null && state.critique() == null && state.round() > 0) {
             telemetry.incrementCurrent("criticCheckpointResumes", 1);
             checkBudget(runStartedNanos, "Executor Checkpoint");
-            state = critiqueRound(mediaId, relevantContext, plan, state.result(), state.round(), profile);
+            state = critiqueRound(mediaId, relevantContext, context, plan, state.result(), state.round(), profile);
             if (!state.critique().passed() && state.round() < maxRounds) {
                 relevantContext = contextForRetry(
                         mediaId, context, relevantContext, state.critique(), profile);
@@ -146,7 +146,7 @@ public class AgentLoopService {
         for (int round = state.round() + 1; round <= maxRounds; round++) {
             checkBudget(runStartedNanos, "Agent Round " + round);
             state = executeRound(
-                    mediaId, relevantContext, plan, state.critique(), round, runStartedNanos, profile);
+                    mediaId, relevantContext, context, plan, state.critique(), round, runStartedNanos, profile);
             if (state.critique().passed()) break;
             if (round < maxRounds) {
                 relevantContext = contextForRetry(
@@ -186,6 +186,7 @@ public class AgentLoopService {
 
     private AgentState executeRound(Long mediaId,
                                     VideoContext context,
+                                    VideoContext fullContext,
                                     AgentState.AgentPlan plan,
                                     AgentState.CriticResult previousCritique,
                                     int round,
@@ -201,11 +202,16 @@ public class AgentLoopService {
                     "Executor 草稿已保存，开始校验证据", TaskStage.EXECUTOR_COMPLETED);
         }
         checkBudget(runStartedNanos, "Executor");
-        return critiqueRound(mediaId, context, plan, result, round, profile);
+        return critiqueRound(mediaId, context, fullContext, plan, result, round, profile);
     }
 
+    /**
+     * Critic 只看本轮检索出的 context；程序核验证据时对照 fullContext（完整视频），
+     * 避免补检索或断点恢复后检索子集变了，引用原片段的真实证据被误判为“无法核验”。
+     */
     private AgentState critiqueRound(Long mediaId,
                                      VideoContext context,
+                                     VideoContext fullContext,
                                      AgentState.AgentPlan plan,
                                      AnalysisResult result,
                                      int round,
@@ -215,7 +221,7 @@ public class AgentLoopService {
         AgentState.CriticResult critique = normalizeCritique(
                 deepSeekUtils.critique(context, plan, result, criticInstruction(profile)));
         critique = enforceStructureBounds(result, critique, profile);
-        critique = enforceEvidenceBounds(context, result, critique);
+        critique = enforceEvidenceBounds(fullContext, result, critique);
         telemetry.incrementCurrent("criticRounds", 1);
         if (critique.passed()) telemetry.incrementCurrent("criticPassed", 1);
 

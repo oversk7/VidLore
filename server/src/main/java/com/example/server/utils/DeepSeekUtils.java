@@ -2,12 +2,14 @@ package com.example.server.utils;
 
 import com.example.server.dto.AgentState;
 import com.example.server.dto.AnalysisResult;
+import com.example.server.dto.ExecutorDraft;
 import com.example.server.dto.ModeClassification;
 import com.example.server.dto.VideoChunk;
 import com.example.server.dto.VideoContext;
 import com.example.server.dto.VideoRetrievalIntent;
 import com.example.server.service.AgentExecutionBudget;
 import com.example.server.service.AgentTelemetry;
+import com.example.server.service.EvidenceCatalog;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import dev.langchain4j.agent.tool.ToolExecutionRequest;
 import dev.langchain4j.agent.tool.ToolSpecification;
@@ -267,23 +269,27 @@ public class DeepSeekUtils {
                                   AgentState.CriticResult previousCritique,
                                   String modeInstruction) {
         try {
+            EvidenceCatalog catalog = EvidenceCatalog.of(context);
             String prompt = """
                     你是 Video Agent 的 Executor。按照计划分析 VideoContext 并生成结构化产物。
                     逐项执行 Plan 中的任务，最终产物必须覆盖全部任务。
-                    conclusions 中的每条结论都必须至少绑定一条真实证据。
-                    evidence.claim 必须原样复制它所支持的 conclusion，timestampMs 必须落在原始片段内，source 只能是 ASR、OCR 或 ASR+OCR。
+                    VideoContext 中每行行首是证据编号：S120.T3 表示从第 120 秒开始的片段里语音转写的第 3 句，S120.O1 表示该片段画面文字的第 1 行。
+                    每条结论都必须在 refs 中列出 1 到 3 个支撑它的证据编号，编号必须从 VideoContext 行首原样复制，不得编造。
+                    不要复述证据原文，系统会按编号回填原文、时间戳和来源。
                     不得使用视频上下文之外的事实。
                     如果存在 Critic 反馈，只修正被指出的问题，并保留已经核验通过的结论和证据。
 
                     只返回 JSON：
                     {
                       "title": "产物标题",
-                      "conclusions": ["结论"],
-                      "evidence": [
-                        {"timestampMs": 120000, "source": "ASR", "content": "原始证据内容", "claim": "结论"}
+                      "conclusions": [
+                        {"text": "结论", "refs": ["S120.T3", "S120.O1"]}
                       ],
                       "suggestions": ["建议"]
                     }
+
+                    用户目标：
+                    """ + context.userGoal() + """
 
                     Plan:
                     """ + objectMapper.writeValueAsString(plan) + """
@@ -292,9 +298,12 @@ public class DeepSeekUtils {
                     """ + objectMapper.writeValueAsString(previousCritique) + """
 
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context)
+                    """ + catalog.render()
                     + executeSuffix(modeInstruction);
-            return structuredChat("EXECUTOR", prompt, AnalysisResult.class);
+            ExecutorDraft draft = structuredChat("EXECUTOR", prompt, ExecutorDraft.class);
+            EvidenceCatalog.Resolution resolution = catalog.resolve(draft);
+            telemetry.incrementCurrent("evidenceRefsUnresolved", resolution.unresolvedRefs().size());
+            return resolution.result();
         } catch (Exception e) {
             throw new IllegalStateException("Agent 执行失败", e);
         }
@@ -317,7 +326,7 @@ public class DeepSeekUtils {
                     检查标准：
                     1. 是否覆盖用户目标和 Planner 的全部任务；
                     2. conclusions 中的每条结论是否都有 evidence.claim 的明确绑定；
-                    3. 每条绑定证据的时间戳、来源和原文是否能在 VideoContext 中核验；
+                    3. evidence.content 由系统按编号从 VideoContext 原样回填，一定真实存在；请判断它能否真正支撑所绑定的结论；
                     4. 是否存在上下文不支持的结论；
                     5. title、conclusions、evidence、suggestions 是否完整。
 
@@ -325,7 +334,7 @@ public class DeepSeekUtils {
                     feedback 只填写能够基于当前 VideoContext 直接重写的修改动作。
                     missingRequirements 填写未覆盖的用户目标或 Planner 任务。
                     unsupportedClaims 填写当前 VideoContext 无法支持、需要重新检索证据的结论。
-                    requiredTimestamps 只填写需要定向加载原始证据的时间戳；无需补充证据时返回空数组。
+                    requiredTimestamps 只填写需要定向加载原始证据的时间戳，单位毫秒，例如片段 S120 对应 120000；无需补充证据时返回空数组。
                     只返回 JSON：
                     {
                       "passed": false,
@@ -341,8 +350,11 @@ public class DeepSeekUtils {
                     Draft:
                     """ + objectMapper.writeValueAsString(result) + """
 
+                    用户目标：
+                    """ + context.userGoal() + """
+
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context)
+                    """ + EvidenceCatalog.of(context).render()
                     + modeSuffix("本次审查模式的额外校验要求：", modeInstruction);
             return structuredChat("CRITIC", prompt, AgentState.CriticResult.class);
         } catch (Exception e) {
@@ -369,7 +381,7 @@ public class DeepSeekUtils {
         return "\n\n本次分析模式的额外产物要求：" + modeInstruction
                 + "\n在返回的 JSON 中额外包含一个 \"sections\" 数组,每个元素形如 "
                 + "{\"key\": \"英文标识\", \"title\": \"面向用户的标题\", \"items\": [\"要点\"]};"
-                + "仍需保留 title、conclusions、evidence、suggestions,且这些额外段落也不得虚构、须基于视频内容。";
+                + "仍需保留 title、conclusions(含 refs)、suggestions,且这些额外段落也不得虚构、须基于视频内容。";
     }
 
     private <T> T parseJson(String response, Class<T> type) throws Exception {
