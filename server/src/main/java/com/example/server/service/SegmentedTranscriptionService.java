@@ -45,9 +45,11 @@ public class SegmentedTranscriptionService {
             Path audioFile = audioFiles.get(i);
             try {
                 telemetry.increment(traceId, "asrCalls", 1);
-                String text = aliyunAsrUtils.audioToText(audioFile.toString());
-                if (text != null && !text.isBlank()) {
-                    result.add(new TranscriptSegment(i * SEGMENT_MS, (i + 1) * SEGMENT_MS, text));
+                // ASR 给的是相对这一分钟音频的时间，加上切片起点才是视频里的时间。
+                long offsetMs = i * SEGMENT_MS;
+                for (TranscriptSegment sentence : aliyunAsrUtils.audioToSentences(audioFile.toString())) {
+                    result.add(new TranscriptSegment(
+                            offsetMs + sentence.startMs(), offsetMs + sentence.endMs(), sentence.text()));
                 }
             } catch (RuntimeException e) {
                 failedSegments++;

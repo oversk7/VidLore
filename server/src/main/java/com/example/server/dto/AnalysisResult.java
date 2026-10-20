@@ -51,7 +51,12 @@ public record AnalysisResult(
         StringBuilder result = new StringBuilder("## ").append(title).append("\n\n## 核心结论\n");
         conclusions.forEach(item -> result.append("- ").append(item).append('\n'));
         result.append("\n## 视频证据\n");
-        evidence.forEach(item -> result.append("- [")
+        // 同一条证据可能支撑多条结论，展示时只列一次，并按出现时间排序（有序流的 sorted 是稳定的，同一时间保持原顺序）。
+        evidence.stream()
+                .map(item -> new Evidence(item.timestampMs(), item.source(), item.content(), ""))
+                .distinct()
+                .sorted(java.util.Comparator.comparingLong(Evidence::timestampMs))
+                .forEach(item -> result.append("- [")
                 .append(formatTime(item.timestampMs()))
                 .append("] ")
                 .append(item.source())

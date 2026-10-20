@@ -5,16 +5,19 @@ import com.example.server.dto.ExecutorDraft;
 import com.example.server.dto.VideoContext;
 
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
 import java.util.regex.Pattern;
 
 /**
  * 证据编号表：给每句转写、每行画面文字编一个编号，模型只引用编号，原文由代码按编号回填。
  *
  * <p>编号形如 {@code S120.T3}：S 后是片段起始秒，T 是该片段语音转写的第 3 句，O 是画面文字的第几行。
+ * 每条证据的时间戳取这句话自己的开始时间（ASR 句级时间）或所在关键帧的时间，旧缓存没有时退回片段起始时间。
  * 用起始秒而不用片段序号，是因为每轮交给模型的只是检索出的子集，序号会随子集变化，
  * 而片段按固定时间窗切分，起始秒在整段视频里唯一且稳定。
  */
@@ -40,22 +43,28 @@ public final class EvidenceCatalog {
         for (VideoContext.VideoSegment segment : context.segments()) {
             String segmentRef = "S" + segment.startMs() / 1000;
             List<Entry> segmentEntries = new ArrayList<>();
+            // 转写每行是 ASR 给出的一句（带开始时间），一行里可能还有多个句号，拆开后共用这一行的时间。
+            List<String> transcriptLines = LINE_BREAK.splitAsStream(segment.transcript()).toList();
             int sentenceNo = 0;
-            for (String sentence : SENTENCE_END.split(segment.transcript())) {
-                String text = singleLine(sentence);
-                if (meaningfulChars(text) == 0) continue;
-                segmentEntries.add(new Entry(segmentRef + ".T" + ++sentenceNo, segment.startMs(), "ASR", text));
+            for (int i = 0; i < transcriptLines.size(); i++) {
+                long timestampMs = timeAt(segment.transcriptTimesMs(), transcriptLines.size(), i, segment.startMs());
+                for (String sentence : SENTENCE_END.split(transcriptLines.get(i))) {
+                    String text = singleLine(sentence);
+                    if (meaningfulChars(text) == 0) continue;
+                    segmentEntries.add(new Entry(segmentRef + ".T" + ++sentenceNo, timestampMs, "ASR", text));
+                }
             }
-            // OCR 噪声行（如 "=]"）对模型没有信息量，只会浪费 Token，过滤掉；多张关键帧的重复行只保留一次。
-            List<String> ocrLines = segment.ocrTexts().stream()
-                    .flatMap(LINE_BREAK::splitAsStream)
-                    .map(EvidenceCatalog::singleLine)
-                    .filter(line -> meaningfulChars(line) >= MIN_OCR_LINE_CHARS)
-                    .distinct()
-                    .toList();
+            // OCR 噪声行（如 "=]"）对模型没有信息量，只会浪费 Token，过滤掉；
+            // 多张关键帧的重复行只保留一次，时间取最早出现的那一帧。
+            Set<String> seenOcrLines = new HashSet<>();
             int lineNo = 0;
-            for (String line : ocrLines) {
-                segmentEntries.add(new Entry(segmentRef + ".O" + ++lineNo, segment.startMs(), "OCR", line));
+            for (int i = 0; i < segment.ocrTexts().size(); i++) {
+                long timestampMs = timeAt(segment.ocrTimesMs(), segment.ocrTexts().size(), i, segment.startMs());
+                for (String rawLine : LINE_BREAK.split(segment.ocrTexts().get(i))) {
+                    String line = singleLine(rawLine);
+                    if (meaningfulChars(line) < MIN_OCR_LINE_CHARS || !seenOcrLines.add(line)) continue;
+                    segmentEntries.add(new Entry(segmentRef + ".O" + ++lineNo, timestampMs, "OCR", line));
+                }
             }
             if (segmentEntries.isEmpty()) continue;
 
@@ -64,7 +73,8 @@ public final class EvidenceCatalog {
                     .append("]\n");
             for (Entry entry : segmentEntries) {
                 entries.putIfAbsent(entry.ref(), entry);
-                out.append(entry.ref()).append(' ').append(entry.text()).append('\n');
+                out.append(entry.ref()).append(" [").append(formatTime(entry.timestampMs())).append("] ")
+                        .append(entry.text()).append('\n');
             }
         }
         rendered = out.toString();
@@ -114,6 +124,11 @@ public final class EvidenceCatalog {
     /** 折叠原文里的换行：一条证据只占一行，原文里的文字无法伪装成一行带编号的证据。 */
     private static String singleLine(String text) {
         return text.replaceAll("\\s+", " ").trim();
+    }
+
+    /** 时间列表和文本数量对得上才用（旧缓存没有时间），否则退回片段起始时间。 */
+    private static long timeAt(List<Long> times, int expectedSize, int index, long fallbackMs) {
+        return times.size() == expectedSize ? times.get(index) : fallbackMs;
     }
 
     private static int meaningfulChars(String text) {

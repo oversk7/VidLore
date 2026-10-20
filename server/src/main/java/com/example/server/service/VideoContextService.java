@@ -268,13 +268,17 @@ public class VideoContextService {
         Map<Long, SegmentBuilder> windows = new TreeMap<>();
         for (TranscriptSegment transcript : transcripts) {
             long windowStart = windowStart(transcript.startMs());
-            windows.computeIfAbsent(windowStart, SegmentBuilder::new).transcripts.add(transcript.text());
+            SegmentBuilder segment = windows.computeIfAbsent(windowStart, SegmentBuilder::new);
+            // 每句单独占一行，行号和 transcriptTimesMs 的下标一一对应。
+            segment.transcripts.add(transcript.text().replaceAll("\\s*\\R\\s*", " "));
+            segment.transcriptTimesMs.add(transcript.startMs());
         }
         for (FramePart frame : frames) {
             long windowStart = windowStart(frame.timestampMs());
             SegmentBuilder segment = windows.computeIfAbsent(windowStart, SegmentBuilder::new);
             if (frame.ocrText() != null && !frame.ocrText().isBlank()) {
                 segment.ocrTexts.add(frame.ocrText());
+                segment.ocrTimesMs.add(frame.timestampMs());
             }
             segment.evidenceFrames.add(frame.frameName());
         }
@@ -383,6 +387,8 @@ public class VideoContextService {
         private final List<String> transcripts = new ArrayList<>();
         private final List<String> ocrTexts = new ArrayList<>();
         private final List<String> evidenceFrames = new ArrayList<>();
+        private final List<Long> transcriptTimesMs = new ArrayList<>();
+        private final List<Long> ocrTimesMs = new ArrayList<>();
 
         private SegmentBuilder(long startMs) {
             this.startMs = startMs;
@@ -394,7 +400,9 @@ public class VideoContextService {
                     startMs + SEGMENT_MS,
                     String.join("\n", transcripts),
                     ocrTexts,
-                    evidenceFrames
+                    evidenceFrames,
+                    transcriptTimesMs,
+                    ocrTimesMs
             );
         }
     }

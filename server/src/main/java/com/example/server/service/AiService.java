@@ -403,7 +403,9 @@ public class AiService {
                         segment.ocrTexts(),
                         segment.evidenceFrames().isEmpty()
                                 ? java.util.List.of()
-                                : java.util.List.of(targetSource + "#timestampMs=" + segment.startMs())))
+                                : java.util.List.of(targetSource + "#timestampMs=" + segment.startMs()),
+                        segment.transcriptTimesMs(),
+                        segment.ocrTimesMs()))
                 .toList());
     }
 

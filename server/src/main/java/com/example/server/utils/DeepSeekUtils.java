@@ -46,6 +46,11 @@ public class DeepSeekUtils {
 
     private static final int MAX_MODEL_ATTEMPTS = 3;
     private static final int MAX_CAUSE_DEPTH = 8;
+    /** understoodGoal 和 tasks 会展示给用户；证据出处由系统展示，任务里不该要求模型去标注。 */
+    private static final String PLAN_AUDIENCE_RULE = """
+            understoodGoal 和 tasks 会展示给普通用户，用大白话描述要分析视频的哪些内容（讲了什么、观点、步骤、结论）。
+            不要要求标注证据来源（ASR、OCR）、片段编号或毫秒时间范围，也不要要求评价转写或识别质量，证据的出处和时间由系统自动展示。
+            """;
     private static final String SYSTEM_POLICY = """
             你是 VidLore 的受控 Video Agent 模型组件，只执行当前请求开头明确指定的
             Planner、检索规划、Executor、Critic、摘要或意图分类职责。
@@ -109,15 +114,19 @@ public class DeepSeekUtils {
         try {
             String prompt = """
                     你是 Video Agent 的 Planner。理解用户目标，并拆成 1 到 5 个可执行任务。
-                    任务必须能够仅依靠 VideoContext 中的 ASR、OCR 和时间戳证据完成。
+                    任务必须能够仅依靠 VideoContext 中的内容完成。
                     任务按执行顺序排列，每项只描述一个可验证的分析动作。
+                    """ + PLAN_AUDIENCE_RULE + """
                     只返回 JSON：
                     {
                       "understoodGoal": "对用户目标的明确理解",
                       "tasks": ["任务1", "任务2", "任务3"]
                     }
+                    用户目标：
+                    """ + context.userGoal() + """
+
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context)
+                    """ + EvidenceCatalog.of(context).render()
                     + modeSuffix("本次分析模式的额外拆解要求：", modeInstruction);
             return structuredChat("PLANNER", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
@@ -139,7 +148,8 @@ public class DeepSeekUtils {
             String prompt = """
                     你是 Video Agent 的 Planner。Critic 发现当前计划遗漏了用户要求，请修订计划。
                     保留仍然有效的任务，只补充或调整遗漏部分，最终保持 1 到 5 个有序、可验证的任务。
-                    任务必须能够仅依靠 VideoContext 中的 ASR、OCR 和时间戳证据完成。
+                    任务必须能够仅依靠 VideoContext 中的内容完成。
+                    """ + PLAN_AUDIENCE_RULE + """
                     只返回 JSON：
                     {
                       "understoodGoal": "修订后对用户目标的明确理解",
@@ -151,8 +161,11 @@ public class DeepSeekUtils {
                     Critic:
                     """ + objectMapper.writeValueAsString(critique) + """
 
+                    用户目标：
+                    """ + context.userGoal() + """
+
                     VideoContext:
-                    """ + objectMapper.writeValueAsString(context)
+                    """ + EvidenceCatalog.of(context).render()
                     + modeSuffix("本次分析模式的额外拆解要求：", modeInstruction);
             return structuredChat("REPLANNER", prompt, AgentState.AgentPlan.class);
         } catch (Exception e) {
@@ -273,9 +286,12 @@ public class DeepSeekUtils {
             String prompt = """
                     你是 Video Agent 的 Executor。按照计划分析 VideoContext 并生成结构化产物。
                     逐项执行 Plan 中的任务，最终产物必须覆盖全部任务。
-                    VideoContext 中每行行首是证据编号：S120.T3 表示从第 120 秒开始的片段里语音转写的第 3 句，S120.O1 表示该片段画面文字的第 1 行。
+                    VideoContext 中每行行首是证据编号和这条内容在视频中出现的时间：S120.T3 表示从第 120 秒开始的片段里语音转写的第 3 句，S120.O1 表示该片段画面文字的第 1 行。
                     每条结论都必须在 refs 中列出 1 到 3 个支撑它的证据编号，编号必须从 VideoContext 行首原样复制，不得编造。
                     不要复述证据原文，系统会按编号回填原文、时间戳和来源。
+                    title、conclusions、suggestions（以及 sections，如有）是给普通用户看的：直接陈述视频讲了什么，
+                    不要出现证据编号、片段名、时间段，也不要出现 ASR、OCR、语音转写、画面文字这类处理过程的说法，出处由系统在证据区展示。
+                    结论只写视频讲了什么，不要评论素材本身（如"某段没有讲解""转写有近音字""证据不足"）。
                     不得使用视频上下文之外的事实。
                     如果存在 Critic 反馈，只修正被指出的问题，并保留已经核验通过的结论和证据。
 
@@ -329,6 +345,7 @@ public class DeepSeekUtils {
                     3. evidence.content 由系统按编号从 VideoContext 原样回填，一定真实存在；请判断它能否真正支撑所绑定的结论；
                     4. 是否存在上下文不支持的结论；
                     5. title、conclusions、evidence、suggestions 是否完整。
+                    suggestions 是基于结论给出的行动建议，按设计不单独绑定证据；只要不违背视频内容即可，不要要求它补充时间戳或证据。
 
                     只有全部满足时 passed 才能为 true。
                     feedback 只填写能够基于当前 VideoContext 直接重写的修改动作。
